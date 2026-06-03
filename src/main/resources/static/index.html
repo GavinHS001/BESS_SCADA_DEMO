@@ -1,0 +1,247 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <title>BESS SCADA Monitoring System</title>
+    <!-- STOMP & SockJS for Single-Port Communication -->
+    <script src="https://cdn.bootcdn.net/ajax/libs/sockjs-client/1.5.1/sockjs.min.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/stomp.js/2.3.3/stomp.min.js"></script>
+    <script src="https://cdn.bootcdn.net/ajax/libs/Chart.js/3.9.1/chart.min.js"></script>
+    <style>
+        body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 30px; background-color: #f0f2f5; color: #333; }
+        .dashboard-grid { display: grid; grid-template-columns: 1fr 350px; gap: 20px; }
+        .panel { background: #fff; padding: 20px; border-radius: 12px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); margin-bottom: 20px; }
+        .header { display: flex; justify-content: space-between; align-items: center; margin-bottom: 20px; }
+        .control-group { display: flex; align-items: center; gap: 15px; margin-bottom: 15px; flex-wrap: wrap; }
+        input, button { padding: 10px 15px; border-radius: 6px; border: 1px solid #ddd; font-size: 14px; }
+        button { cursor: pointer; font-weight: 600; transition: all 0.2s; border: none; }
+        .btn-primary { background-color: #007bff; color: white; }
+        .btn-danger { background-color: #dc3545; color: white; }
+        .btn-switch { width: 100%; margin-bottom: 15px; background-color: #6c757d; color: white; font-size: 16px; }
+        .btn-switch.closed { background-color: #28a745; }
+        table { width: 100%; border-collapse: collapse; margin-top: 10px; }
+        th, td { padding: 12px; text-align: center; border-bottom: 1px solid #edf2f7; }
+        th { background-color: #f8fafc; color: #64748b; font-weight: 600; text-transform: uppercase; font-size: 12px; }
+        .charging { color: #28a745; font-weight: bold; }
+        .discharging { color: #dc3545; font-weight: bold; }
+        .visual-panel { text-align: center; }
+        .switch-svg { width: 100%; height: 180px; }
+        .switch-line { stroke: #333; stroke-width: 4; transition: all 0.5s; }
+        .chart-container { height: 350px; width: 100%; }
+        #logContainer { margin-top: 15px; border-top: 1px solid #eee; padding-top: 10px; text-align: left; }
+        .log-item { margin-bottom: 6px; padding: 6px; background-color: #f8fafc; border-radius: 4px; font-size: 11px; }
+        #customModal { display: none; position: fixed; z-index: 1000; left: 0; top: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.5); }
+        .modal-content { background-color: #fff; margin: 15% auto; padding: 25px; border-radius: 12px; width: 350px; box-shadow: 0 5px 15px rgba(0,0,0,0.3); text-align: center; }
+        .modal-btns { display: flex; justify-content: center; gap: 10px; margin-top: 20px; }
+    </style>
+</head>
+<body>
+
+    <div id="customModal">
+        <div class="modal-content">
+            <h4 style="margin-top:0">Operator Authentication</h4>
+            <p style="font-size: 13px; color: #666;">Please enter your email to proceed:</p>
+            <input type="email" id="modalEmail" style="width: 80%; margin-bottom: 10px;" placeholder="engineer@example.com">
+            <div class="modal-btns">
+                <button class="btn-primary" onclick="confirmModal()">Confirm</button>
+                <button style="background:#eee; color:#333" onclick="closeModal()">Cancel</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="header">
+        <h2>🔋 BESS Intelligent SCADA System</h2>
+        <div id="statusText" style="color: #666; font-weight: bold;">Status: CONNECTING...</div>
+    </div>
+
+    <div class="dashboard-grid">
+        <div class="left-col">
+            <div class="panel">
+                <h4>System Control</h4>
+                <div class="control-group">
+                    <label>Power (kW):</label>
+                    <input type="number" id="powerInput" value="1000" step="100">
+                    <button class="btn-primary" onclick="sendControl('run')">Run System</button>
+                    <button class="btn-danger" onclick="sendControl('stop')">Emergency Stop</button>
+                    <div style="width: 100%; font-size: 11px; color: #666; margin-top: 5px;">
+                        * <strong style="color: #28a745;">Negative (-)</strong> to <strong>Charge</strong>, 
+                        <strong style="color: #dc3545;">Positive (+)</strong> to <strong>Discharge</strong>. Max ±1250kW.
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h4>Real-time Monitoring</h4>
+                <table>
+                    <thead>
+                        <tr><th>ID</th><th>SOC (%)</th><th>Voltage (V)</th><th>Current (A)</th><th>Power (kW)</th></tr>
+                    </thead>
+                    <tbody id="batteryTableBody"></tbody>
+                </table>
+            </div>
+        </div>
+
+        <div class="right-col">
+            <div class="panel visual-panel">
+                <h4>Grid Connectivity</h4>
+                <button id="switchBtn" class="btn-switch" onclick="openAuthModal()">Close Breaker</button>
+                <div id="switchStatusLabel" style="font-weight: bold; color: #dc3545; margin-bottom: 10px;">Breaker: OPEN</div>
+                <svg class="switch-svg" viewBox="0 0 200 150">
+                    <rect x="60" y="5" width="80" height="20" fill="#cbd5e1" />
+                    <text x="80" y="19" font-size="10" font-weight="bold">GRID</text>
+                    <line x1="100" y1="25" x2="100" y2="45" stroke="#333" stroke-width="4" />
+                    <circle cx="100" cy="50" r="5" fill="#333" />
+                    <line id="switchArm" x1="100" y1="50" x2="130" y2="20" class="switch-line" />
+                    <circle cx="100" cy="90" r="5" fill="#333" />
+                    <line x1="100" y1="95" x2="100" y2="115" stroke="#333" stroke-width="4" />
+                    <rect x="50" y="115" width="100" height="30" fill="#e2e8f0" stroke="#475569" stroke-width="2" />
+                    <text x="75" y="135" font-size="12" font-weight="bold">BESS</text>
+                </svg>
+                <div id="logContainer">
+                    <h5 style="margin: 0 0 8px 0; font-size: 13px; color: #64748b;">Operation Logs</h5>
+                    <div id="logs" style="color: #999; font-size: 11px;">No operations recorded yet.</div>
+                </div>
+            </div>
+            <div class="panel">
+                <h4>Quick Telemetry</h4>
+                <div style="font-size: 14px; line-height: 2.2;">
+                    <div style="color: #ffc107;">Frequency: <span id="freqVal" style="font-weight: bold;">50.000</span> Hz</div>
+                    <div style="color: #007bff;">Total Current: <span id="totalCurrVal" style="font-weight: bold;">0.00</span> A</div>
+                    <div style="color: #28a745;">Avg SOC: <span id="avgSocVal" style="font-weight: bold;">0.00</span> %</div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="panel">
+        <h4>System Trends</h4>
+        <div class="chart-container"><canvas id="scadaChart"></canvas></div>
+    </div>
+
+    <script>
+        let stompClient = null;
+        let isSwitchClosed = false;
+        let chart;
+
+        function initChart() {
+            const ctx = document.getElementById('scadaChart').getContext('2d');
+            chart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [
+                        { label: 'SOC (%)', borderColor: '#28a745', data: [], yAxisID: 'y_soc', tension: 0.1 },
+                        { label: 'Freq (Hz)', borderColor: '#ffc107', data: [], yAxisID: 'y_freq', tension: 0.4 },
+                        { label: 'Current (A)', borderColor: '#007bff', backgroundColor: 'rgba(0,123,255,0.1)', fill: true, data: [], yAxisID: 'y_curr', tension: 0.1 }
+                    ]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    scales: {
+                        y_soc: { type: 'linear', position: 'left', min: 0, max: 100 },
+                        y_freq: { type: 'linear', position: 'right', min: 49.5, max: 50.5, grid: { drawOnChartArea: false } },
+                        y_curr: { type: 'linear', position: 'right', min: -1000, max: 1000, grid: { drawOnChartArea: false } }
+                    }
+                }
+            });
+        }
+
+        function connect() {
+            const socket = new SockJS('/scada-ws');
+            stompClient = Stomp.over(socket);
+            stompClient.debug = null; // Disable console logging for STOMP
+            stompClient.connect({}, function (frame) {
+                document.getElementById('statusText').innerText = 'Status: ONLINE';
+                document.getElementById('statusText').style.color = '#28a745';
+                
+                stompClient.subscribe('/topic/battery', function (msg) {
+                    updateBatteryData(JSON.parse(msg.body));
+                });
+                stompClient.subscribe('/topic/switch', function (msg) {
+                    updateSwitchUI(JSON.parse(msg.body));
+                });
+                stompClient.subscribe('/topic/logs', function (msg) {
+                    updateLogs(JSON.parse(msg.body));
+                });
+            }, function(err) {
+                document.getElementById('statusText').innerText = 'Status: DISCONNECTED';
+                document.getElementById('statusText').style.color = 'red';
+                setTimeout(connect, 5000);
+            });
+        }
+
+        function updateBatteryData(data) {
+            const tbody = document.getElementById('batteryTableBody');
+            tbody.innerHTML = ''; 
+            let sumSoc = 0, sumCurr = 0;
+            data.forEach(p => {
+                sumSoc += p.soc; sumCurr += p.current;
+                const kw = (p.power / 1000.0).toFixed(2);
+                const cls = (p.power < 0) ? 'class="charging"' : (p.power > 0 ? 'class="discharging"' : '');
+                tbody.innerHTML += `<tr><td>#${p.id}</td><td>${p.soc.toFixed(2)}%</td><td>${p.voltage.toFixed(1)}V</td><td>${p.current.toFixed(2)}A</td><td ${cls}>${kw} kW</td></tr>`;
+            });
+            const avgSoc = sumSoc / data.length;
+            const totalCurr = sumCurr; 
+            const freq = 50.0 + (Math.random() - 0.5) * 0.04;
+            document.getElementById('totalCurrVal').innerText = totalCurr.toFixed(2);
+            document.getElementById('freqVal').innerText = freq.toFixed(3);
+            document.getElementById('avgSocVal').innerText = avgSoc.toFixed(2);
+
+            const timeStr = new Date().toLocaleTimeString();
+            chart.data.labels.push(timeStr);
+            chart.data.datasets[0].data.push(avgSoc);
+            chart.data.datasets[1].data.push(freq);
+            chart.data.datasets[2].data.push(totalCurr);
+            if (chart.data.labels.length > 30) {
+                chart.data.labels.shift();
+                chart.data.datasets.forEach(d => d.data.shift());
+            }
+            chart.update('none');
+        }
+
+        function updateLogs(logs) {
+            const container = document.getElementById('logs');
+            container.innerHTML = '';
+            if (logs.length === 0) { container.innerHTML = 'No operations recorded yet.'; return; }
+            logs.forEach(log => {
+                container.innerHTML += `<div class="log-item"><span style="color: #007bff; font-weight: bold;">${log.operator}</span> <span style="color: ${log.action === 'CLOSED' ? '#28a745' : '#dc3545'}; font-weight: bold;">${log.action}</span> at <span style="color: #666;">${log.time}</span></div>`;
+            });
+        }
+
+        function openAuthModal() { document.getElementById('customModal').style.display = 'block'; document.getElementById('modalEmail').focus(); }
+        function closeModal() { document.getElementById('customModal').style.display = 'none'; }
+        
+        function confirmModal() {
+            const email = document.getElementById('modalEmail').value;
+            if (email.trim() === "") { alert("Email is required!"); return; }
+            stompClient.send("/app/switch", {}, JSON.stringify({ closed: !isSwitchClosed, email: email }));
+            closeModal();
+        }
+
+        function updateSwitchUI(closed) {
+            isSwitchClosed = closed;
+            const arm = document.getElementById('switchArm');
+            const lbl = document.getElementById('switchStatusLabel');
+            const btn = document.getElementById('switchBtn');
+            if (closed) {
+                arm.setAttribute('x2', '100'); arm.setAttribute('y2', '90');
+                lbl.innerText = 'Breaker: CLOSED'; lbl.style.color = '#28a745';
+                btn.innerText = 'Open Breaker'; btn.classList.add('closed');
+            } else {
+                arm.setAttribute('x2', '130'); arm.setAttribute('y2', '20');
+                lbl.innerText = 'Breaker: OPEN'; lbl.style.color = '#dc3545';
+                btn.innerText = 'Close Breaker'; btn.classList.remove('closed');
+            }
+        }
+
+        function sendControl(action) {
+            if (!isSwitchClosed && action !== 'stop') { alert('Safety Interlock: Breaker is OPEN!'); return; }
+            const p = parseFloat(document.getElementById('powerInput').value);
+            stompClient.send("/app/control", {}, JSON.stringify({ action: action, power: p }));
+        }
+
+        window.onload = () => { initChart(); connect(); };
+    </script>
+</body>
+</html>
